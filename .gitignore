@@ -1,0 +1,9 @@
+# sensitive shi
+config.json
+accounts.txt
+proxy.txt
+
+__pycache__/
+
+/venv
+/.idea
