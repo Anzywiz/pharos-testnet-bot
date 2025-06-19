@@ -661,7 +661,7 @@ async def process_account(bot, private_key, address):
         for i in range(friends_count):
             receiver = bot.generate_random_receiver()
             amount = get_random_amount("sendAmount")
-            balance = token_balances.get('PHRS', 0)
+            balance = bot.get_balance(address, 'PHRS')
 
             # display
             log(f"{Fore.GREEN}Balance: {balance}{Style.RESET_ALL}")
@@ -683,7 +683,8 @@ async def process_account(bot, private_key, address):
                 # Use timeout with logging for short delays
                 time1, time2 = get_short_timeout()
                 await timeout_with_log(time1, time2)
-
+        points = profile.get("data", {}).get("user_info", {}).get("TotalPoints", "N/A") if profile else "N/A"
+        log(f"{Fore.WHITE}💎 Points: {points}{Style.RESET_ALL}")
     # Wrap/Unwrap cycles
     wrap_cycles = config.get("wrapCycle", 0)
     if wrap_cycles > 0:
