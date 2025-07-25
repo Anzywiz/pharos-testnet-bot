@@ -273,19 +273,29 @@ class PharosBot:
             decimals = contract.functions.decimals().call()
         return balance / (10 ** decimals)
 
-    async def api_call(self, method, url, address, token=None, retries=3):
+    async def api_call(self, method, url, address, token=None, data=None, retries=3):
         proxy = self.get_proxy(address)
         headers = {**self.headers}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        if method == "POST":
-            headers["Content-Length"] = "0"
+
+        # Handle different POST scenarios
+        if method == "POST" and data:
+            headers["Content-Type"] = "application/json"
+        elif method == "POST":
+            headers["Content-Length"] = "0"  # Empty POST body
 
         for attempt in range(retries):
             try:
                 connector = ProxyConnector.from_url(proxy) if proxy else None
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with getattr(session, method.lower())(url, headers=headers) as response:
+                    # Prepare request arguments
+                    request_kwargs = {"url": url, "headers": headers}
+                    if method == "POST" and data:
+                        request_kwargs["json"] = data
+                    # If no data, request_kwargs remains basic (no body)
+
+                    async with getattr(session, method.lower())(**request_kwargs) as response:
                         response.raise_for_status()
                         return await response.json()
             except Exception as e:
@@ -325,10 +335,17 @@ class PharosBot:
             else:
                 raise Exception(f"{msg}")
         return status
+    'https://api.pharosnetwork.xyz/task/verify'
+    'https://api.pharosnetwork.xyz'
 
     async def verify_transfer(self, address, token, tx_hash):
         url = f"{self.BASE_API}/task/verify?address={address}&task_id=103&tx_hash={tx_hash}"
-        verify_response = await self.api_call("POST", url, address, token)
+        payload = {
+            "address": f"{address}",
+            "task_id": 103,
+            "tx_hash": f"{tx_hash}"
+        }
+        verify_response = await self.api_call("POST", url, address, token, payload)
         if verify_response and verify_response.get("msg") == "task verified successfully":
             return verify_response
         else:
