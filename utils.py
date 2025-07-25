@@ -335,8 +335,6 @@ class PharosBot:
             else:
                 raise Exception(f"{msg}")
         return status
-    'https://api.pharosnetwork.xyz/task/verify'
-    'https://api.pharosnetwork.xyz'
 
     async def verify_transfer(self, address, token, tx_hash):
         url = f"{self.BASE_API}/task/verify?address={address}&task_id=103&tx_hash={tx_hash}"
