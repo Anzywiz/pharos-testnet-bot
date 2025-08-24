@@ -100,7 +100,10 @@ class PharosBot:
             'USDC_OLD': "0xad902cf99c2de2f1ba5ec4d642fd7e49cae9ee37",
             'USDT_OLD': "0xEd59De2D7ad9C043442e381231eE3646FC3C2939",
             'ROUTER': "0x1a4de519154ae51200b0ad7c90f7fac75547888a",
-            'SWAP_ROUTER': "0x1A4DE519154Ae51200b0Ad7c90F7faC75547888a"
+            'SWAP_ROUTER': "0x1A4DE519154Ae51200b0Ad7c90F7faC75547888a",
+            'FAROSWAP_ROUTER': '0x3541423f25a1ca5c98fdbcf478405d3f0aad1164',
+            'POSITION_MANAGER': "0x4b177aded3b8bd1d5d747f91b9e853513838cd49",
+
         }
 
         # Updated ABIs with proper function signatures
@@ -130,6 +133,40 @@ class PharosBot:
             }
         ]
 
+        # Add this ABI to your __init__ method after existing ABIs
+        self.ADD_LP_CONTRACT_ABI = [
+            {
+                "inputs": [
+                    {
+                        "components": [
+                            {"internalType": "address", "name": "token0", "type": "address"},
+                            {"internalType": "address", "name": "token1", "type": "address"},
+                            {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                            {"internalType": "int24", "name": "tickLower", "type": "int24"},
+                            {"internalType": "int24", "name": "tickUpper", "type": "int24"},
+                            {"internalType": "uint256", "name": "amount0Desired", "type": "uint256"},
+                            {"internalType": "uint256", "name": "amount1Desired", "type": "uint256"},
+                            {"internalType": "uint256", "name": "amount0Min", "type": "uint256"},
+                            {"internalType": "uint256", "name": "amount1Min", "type": "uint256"},
+                            {"internalType": "address", "name": "recipient", "type": "address"},
+                            {"internalType": "uint256", "name": "deadline", "type": "uint256"},
+                        ],
+                        "internalType": "struct INonfungiblePositionManager.MintParams",
+                        "name": "params",
+                        "type": "tuple",
+                    },
+                ],
+                "name": "mint",
+                "outputs": [
+                    {"internalType": "uint256", "name": "tokenId", "type": "uint256"},
+                    {"internalType": "uint128", "name": "liquidity", "type": "uint128"},
+                    {"internalType": "uint256", "name": "amount0", "type": "uint256"},
+                    {"internalType": "uint256", "name": "amount1", "type": "uint256"},
+                ],
+                "stateMutability": "payable",
+                "type": "function",
+            },
+        ]
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
@@ -396,7 +433,7 @@ class PharosBot:
         log(f"{Fore.CYAN}🌐 Explorer: https://testnet.pharosscan.xyz/tx/{tx_hash}{Style.RESET_ALL}")
         return tx_hash, receipt.blockNumber
 
-    def swap_tokens(self, private_key, address, from_token, to_token, amount):
+    def swap_tokens(self, private_key, address, from_token, to_token, amount, swap_type='zenith_swap'):
         """
         Fixed swap function based on the working example
         """
@@ -437,7 +474,10 @@ class PharosBot:
             )
 
             # Use the correct router address
-            router_address = "0x1A4DE519154Ae51200b0Ad7c90F7faC75547888a"  # SWAP_ROUTER_ADDRESS
+            if swap_type == 'faroswap':
+                router_address = self.CONTRACTS['FAROSWAP_ROUTER']
+            else:
+                router_address = self.CONTRACTS['SWAP_ROUTER']
 
             # Router ABI for multicall
             router_abi = [
@@ -590,6 +630,161 @@ class PharosBot:
             log(f"{Fore.RED}❌ Token approval failed: {str(e)}{Style.RESET_ALL}")
             raise e
 
+    def add_liquidity(self, private_key, address, token0_symbol, token1_symbol, amount0, amount1):
+        """
+        Add liquidity to a token pair
+        """
+        w3 = self.get_web3(address)
+
+        log(f"{Fore.BLUE}💧 Adding LP: {amount0} {token0_symbol} + {amount1} {token1_symbol}{Style.RESET_ALL}")
+
+        try:
+            # Get token addresses
+            token0_address = self.CONTRACTS[token0_symbol]
+            token1_address = self.CONTRACTS[token1_symbol]
+
+            # Approve tokens for position manager
+            if token0_symbol != 'PHRS':
+                log(f"{Fore.YELLOW}📝 Approving {token0_symbol}...{Style.RESET_ALL}")
+                self.approve_token_spending_for_lp(private_key, address, token0_symbol, amount0)
+
+            if token1_symbol != 'PHRS':
+                log(f"{Fore.YELLOW}📝 Approving {token1_symbol}...{Style.RESET_ALL}")
+                self.approve_token_spending_for_lp(private_key, address, token1_symbol, amount1)
+
+            # Get token decimals and convert amounts
+            if token0_symbol == 'PHRS':
+                token0_decimals = 18
+                amount0_desired = w3.to_wei(amount0, "ether")
+            else:
+                token0_contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(token0_address),
+                    abi=self.ERC20_ABI
+                )
+                token0_decimals = token0_contract.functions.decimals().call()
+                amount0_desired = int(amount0 * (10 ** token0_decimals))
+
+            if token1_symbol == 'PHRS':
+                token1_decimals = 18
+                amount1_desired = w3.to_wei(amount1, "ether")
+            else:
+                token1_contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(token1_address),
+                    abi=self.ERC20_ABI
+                )
+                token1_decimals = token1_contract.functions.decimals().call()
+                amount1_desired = int(amount1 * (10 ** token1_decimals))
+
+            # Build mint parameters
+            mint_params = {
+                "token0": Web3.to_checksum_address(token0_address),
+                "token1": Web3.to_checksum_address(token1_address),
+                "fee": 500,  # 0.05% fee tier
+                "tickLower": -887270,  # Full range
+                "tickUpper": 887270,  # Full range
+                "amount0Desired": amount0_desired,
+                "amount1Desired": amount1_desired,
+                "amount0Min": 0,  # Accept any amount
+                "amount1Min": 0,  # Accept any amount
+                "recipient": Web3.to_checksum_address(address),
+                "deadline": int(time.time()) + 600  # 10 minutes
+            }
+
+            # Create position manager contract
+            position_manager = w3.eth.contract(
+                address=Web3.to_checksum_address(self.CONTRACTS['POSITION_MANAGER']),
+                abi=self.ADD_LP_CONTRACT_ABI
+            )
+
+            # Build transaction
+            base_tx = {
+                "from": address,
+                "gas": 500000,  # Higher gas for LP operations
+                "gasPrice": w3.eth.gas_price,
+                "nonce": w3.eth.get_transaction_count(address),
+                "chainId": w3.eth.chain_id
+            }
+
+            # Add ETH value if one of the tokens is PHRS
+            if token0_symbol == 'PHRS':
+                base_tx["value"] = amount0_desired
+            elif token1_symbol == 'PHRS':
+                base_tx["value"] = amount1_desired
+
+            lp_tx = position_manager.functions.mint(mint_params).build_transaction(base_tx)
+
+            # Send transaction
+            log(f"{Fore.YELLOW}📡 Sending LP transaction...{Style.RESET_ALL}")
+            signed_tx = w3.eth.account.sign_transaction(lp_tx, private_key)
+            tx_hash = w3.to_hex(w3.eth.send_raw_transaction(signed_tx.raw_transaction))
+
+            log(f"{Fore.CYAN}⏳ Waiting for LP confirmation...{Style.RESET_ALL}")
+            log(f"{Fore.CYAN}🌐 Explorer: https://testnet.pharosscan.xyz/tx/{tx_hash}{Style.RESET_ALL}")
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+
+            if receipt.status == 1:
+                log(
+                    f"{Fore.GREEN}✅ LP SUCCESS: {amount0} {token0_symbol} + {amount1} {token1_symbol}{Style.RESET_ALL}")
+                return tx_hash, receipt.blockNumber
+            else:
+                raise Exception(f"LP transaction failed. Status: {receipt.status}")
+
+        except Exception as e:
+            log(f"{Fore.RED}❌ LP FAILED: {str(e)}{Style.RESET_ALL}")
+            raise e
+
+    def approve_token_spending_for_lp(self, private_key, address, token, amount):
+        """
+        Approve token spending for LP position manager
+        """
+        try:
+            w3 = self.get_web3(address)
+            spender = Web3.to_checksum_address(self.CONTRACTS['POSITION_MANAGER'])
+
+            token_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(self.CONTRACTS[token]),
+                abi=self.ERC20_ABI
+            )
+
+            # Convert amount to wei
+            if token in ['PHRS', 'WPHRS']:
+                amount_wei = w3.to_wei(amount, "ether")
+            else:
+                decimals = token_contract.functions.decimals().call()
+                amount_wei = int(amount * (10 ** decimals))
+
+            # Check current allowance
+            current_allowance = token_contract.functions.allowance(address, spender).call()
+
+            if current_allowance < amount_wei:
+                approve_tx = token_contract.functions.approve(
+                    spender,
+                    2 ** 256 - 1  # Max approval
+                ).build_transaction({
+                    "from": address,
+                    "gas": 100000,
+                    "gasPrice": w3.eth.gas_price,
+                    "nonce": w3.eth.get_transaction_count(address),
+                    "chainId": w3.eth.chain_id
+                })
+
+                signed_approve = w3.eth.account.sign_transaction(approve_tx, private_key)
+                approve_hash = w3.to_hex(w3.eth.send_raw_transaction(signed_approve.raw_transaction))
+                approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash)
+
+                if approve_receipt.status == 1:
+                    log(f"{Fore.GREEN}✅ LP Approval SUCCESS for {token}{Style.RESET_ALL}")
+                    return True
+                else:
+                    raise Exception("LP approval transaction failed")
+            else:
+                log(f"{Fore.GREEN}✅ Sufficient LP allowance exists for {token}{Style.RESET_ALL}")
+                return True
+
+        except Exception as e:
+            log(f"{Fore.RED}❌ LP token approval failed: {str(e)}{Style.RESET_ALL}")
+            raise e
+
 
 async def retry_operation(operation, *args, max_retries=3, operation_name="Operation"):
     """Enhanced retry logic with detailed logging"""
@@ -607,6 +802,102 @@ async def retry_operation(operation, *args, max_retries=3, operation_name="Opera
             if attempt < max_retries - 1:
                 await timeout_with_log(30, 60)
     return None
+
+
+async def perform_swap(token_balances, bot, private_key, address, swap_type='zenith_swap'):
+
+    # Swap cycles
+    if swap_type == 'faroswap':
+        swap_cycles = config.get("faroSwaps", 0)
+    else:
+        swap_cycles = config.get("zenithSwaps", 0)
+
+    # Check sufficient tokens for swaps
+    sufficient_tokens = []
+    if swap_cycles > 0:
+        log(f"{Fore.BLUE}Starting {swap_cycles} '{swap_type}' swap cycles{Style.RESET_ALL}")
+
+        for token_name, balance in token_balances.items():
+            min_amount = 0.001 if token_name in ['PHRS', 'WPHRS'] else 1.0
+            if balance > min_amount:
+                sufficient_tokens.append((token_name, balance, min_amount))
+
+        if len(sufficient_tokens) < 2:
+            log(f"{Fore.YELLOW}Insufficient tokens with adequate balance for swaps{Style.RESET_ALL}")
+        else:
+            for i in range(swap_cycles):
+                # Select from_token with PHRS weighted preference
+                weights = [3 if token[0] == 'PHRS' else 1 for token in sufficient_tokens]
+                from_token, from_balance, min_amount = random.choices(sufficient_tokens, weights=weights)[0]
+
+                # Select to_token (different from from_token)
+                exclude_tokens = {'PHRS', 'WPHRS'} if from_token in ['PHRS', 'WPHRS'] else {from_token}
+                available_to_tokens = [token for token in token_balances.keys() if token not in exclude_tokens]
+                to_token = random.choice(available_to_tokens)
+
+                log(f'{Fore.GREEN}Balance: {from_balance} {from_token}{Style.RESET_ALL}')
+
+                # Use a portion of the balance for swapping
+                swap_amount = get_random_amount("swapAmount")
+
+                swap_result = await retry_operation(
+                    bot.swap_tokens,
+                    private_key,
+                    address,
+                    from_token,
+                    to_token,
+                    swap_amount,
+                    swap_type,
+                    operation_name=f"Swap ({i + 1}) {from_token}->{to_token}"
+                )
+
+                if swap_result:
+                    time1, time2 = get_short_timeout()
+                    await timeout_with_log(time1, time2)
+
+
+async def perform_lp_operations(token_balances, bot, private_key, address):
+    """
+    Perform LP operations based on config
+    """
+    lp_cycles = config.get("lpCycles", 0)
+    lp_pairs = config.get("lpPairs", [])
+
+    if lp_cycles > 0 and lp_pairs:
+        log(f"{Fore.BLUE}Starting {lp_cycles} LP cycles{Style.RESET_ALL}")
+
+        for i in range(lp_cycles):
+            # Select random LP pair
+            lp_pair = random.choice(lp_pairs)
+            token0 = lp_pair["token0"]
+            token1 = lp_pair["token1"]
+
+            # Get random amounts from config ranges
+            amount0 = round(random.uniform(lp_pair["amount0"][0], lp_pair["amount0"][1]), 6)
+            amount1 = round(random.uniform(lp_pair["amount1"][0], lp_pair["amount1"][1]), 6)
+
+            # Check sufficient balances
+            balance0 = token_balances.get(token0, 0)
+            balance1 = token_balances.get(token1, 0)
+
+            if balance0 >= amount0 and balance1 >= amount1:
+                lp_result = await retry_operation(
+                    bot.add_liquidity,
+                    private_key,
+                    address,
+                    token0,
+                    token1,
+                    amount0,
+                    amount1,
+                    operation_name=f"Add LP ({i + 1}) {token0}/{token1}"
+                )
+
+                if lp_result:
+                    time1, time2 = get_short_timeout()
+                    await timeout_with_log(time1, time2)
+            else:
+                log(
+                    f"{Fore.YELLOW}Insufficient balance for LP {token0}/{token1}: need {amount0}/{amount1}, have {balance0:.6f}/{balance1:.6f}{Style.RESET_ALL}")
 
 
 async def process_account(bot, private_key, address):
@@ -725,47 +1016,11 @@ async def process_account(bot, private_key, address):
                     time1, time2 = get_short_timeout()
                     await timeout_with_log(time1, time2)
 
-    # Check sufficient tokens for swaps
-    sufficient_tokens = []
-    if config.get("swapCycle", 0) > 0:
-        for token_name, balance in token_balances.items():
-            min_amount = 0.001 if token_name in ['PHRS', 'WPHRS'] else 1.0
-            if balance > min_amount:
-                sufficient_tokens.append((token_name, balance, min_amount))
+    # Zenith Swap
+    await perform_swap(token_balances, bot, private_key, address, swap_type='zenith_swap')
 
-    # Swap cycles
-    swap_cycles = config.get("swapCycle", 0)
-    if swap_cycles > 0:
-        log(f"{Fore.BLUE}Starting {swap_cycles} swap cycles{Style.RESET_ALL}")
+    # Faro Swap
+    await perform_swap(token_balances, bot, private_key, address, swap_type='faroswap')
 
-        if len(sufficient_tokens) < 2:
-            log(f"{Fore.YELLOW}Insufficient tokens with adequate balance for swaps{Style.RESET_ALL}")
-        else:
-            for i in range(swap_cycles):
-                # Select from_token with PHRS weighted preference
-                weights = [3 if token[0] == 'PHRS' else 1 for token in sufficient_tokens]
-                from_token, from_balance, min_amount = random.choices(sufficient_tokens, weights=weights)[0]
-
-                # Select to_token (different from from_token)
-                exclude_tokens = {'PHRS', 'WPHRS'} if from_token in ['PHRS', 'WPHRS'] else {from_token}
-                available_to_tokens = [token for token in token_balances.keys() if token not in exclude_tokens]
-                to_token = random.choice(available_to_tokens)
-
-                log(f'{Fore.GREEN}Balance: {from_balance} {from_token}{Style.RESET_ALL}')
-
-                # Use a portion of the balance for swapping
-                swap_amount = get_random_amount("swapAmount")
-
-                swap_result = await retry_operation(
-                    bot.swap_tokens,
-                    private_key,
-                    address,
-                    from_token,
-                    to_token,
-                    swap_amount,
-                    operation_name=f"Swap ({i + 1}) {from_token}->{to_token}"
-                )
-
-                if swap_result:
-                    time1, time2 = get_short_timeout()
-                    await timeout_with_log(time1, time2)
+    # add LP
+    await perform_lp_operations(token_balances, bot, private_key, address)
